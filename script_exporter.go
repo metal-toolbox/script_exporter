@@ -1,17 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"gopkg.in/yaml.v2"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
+	"strings"
 	"time"
+
+	"gopkg.in/yaml.v2"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -41,31 +45,51 @@ type Measurement struct {
 	Script   *Script
 	Success  int
 	Duration float64
+	Labels   map[string]string
 }
 
-func runScript(script *Script) error {
+var pidRE = regexp.MustCompile(`LABEL:(?P<NAME>\w+):(?P<VALUE>.+)`)
+
+func getLabels(output string) map[string]string {
+	m := make(map[string]string)
+	for _, v := range strings.Split(output, "\n") {
+		entryMatches := pidRE.FindStringSubmatch(v)
+		if entryMatches == nil {
+			return m
+		}
+		m[entryMatches[1]] = entryMatches[2]
+	}
+	return m
+}
+
+func runScript(script *Script) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(script.Timeout)*time.Second)
 	defer cancel()
 
 	bashCmd := exec.CommandContext(ctx, *shell)
 
+	var stdBuffer bytes.Buffer
+	mw := io.MultiWriter(os.Stdout, &stdBuffer)
+	bashCmd.Stdout = mw
+	bashCmd.Stderr = mw
 	bashIn, err := bashCmd.StdinPipe()
 
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if err = bashCmd.Start(); err != nil {
-		return err
+		return "", err
 	}
 
 	if _, err = bashIn.Write([]byte(script.Content)); err != nil {
-		return err
+		return "", err
 	}
 
 	bashIn.Close()
 
-	return bashCmd.Wait()
+	err = bashCmd.Wait()
+	return stdBuffer.String(), err
 }
 
 func runScripts(scripts []*Script) []*Measurement {
@@ -77,7 +101,7 @@ func runScripts(scripts []*Script) []*Measurement {
 		go func(script *Script) {
 			start := time.Now()
 			success := 0
-			err := runScript(script)
+			stdout, err := runScript(script)
 			duration := time.Since(start).Seconds()
 
 			if err == nil {
@@ -87,11 +111,16 @@ func runScripts(scripts []*Script) []*Measurement {
 				log.Infof("ERROR: %s: %s (failed after %fs).", script.Name, err, duration)
 			}
 
-			ch <- &Measurement{
+			m := &Measurement{
 				Script:   script,
 				Duration: duration,
 				Success:  success,
 			}
+
+			labels := getLabels(stdout)
+			m.Labels = labels
+
+			ch <- m
 		}(script)
 	}
 
@@ -142,8 +171,12 @@ func scriptRunHandler(w http.ResponseWriter, r *http.Request, config *Config) {
 	measurements := runScripts(scripts)
 
 	for _, measurement := range measurements {
+		labels := ""
+		for k, v := range measurement.Labels {
+			labels += fmt.Sprintf("\"%s=%s\" ", k, v)
+		}
 		fmt.Fprintf(w, "script_duration_seconds{script=\"%s\"} %f\n", measurement.Script.Name, measurement.Duration)
-		fmt.Fprintf(w, "script_success{script=\"%s\"} %d\n", measurement.Script.Name, measurement.Success)
+		fmt.Fprintf(w, "script_success{script=\"%s\" %s} %d\n", measurement.Script.Name, labels, measurement.Success)
 	}
 }
 
