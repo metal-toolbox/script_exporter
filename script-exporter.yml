@@ -14,12 +14,12 @@ metrics:
       labels: 
         - interval
       namespace: audito_maldito      
-  99_default_rules_is_empty:
-      name: 99_default_rules_is_empty
+  audit_99_default_rules_is_empty:
+      name: audit_99_default_rules_is_empty
       type: GaugeVec
-      help: determines if 99-default.rules exists and if not compares expected content
+      help: determines if 99-default.rules exists and if  present compares expected content
       labels: 
-        - exists
+        - file_status
       namespace: audito_maldito         
 scripts:
   - name: 'audit_log_modify_time'
@@ -38,16 +38,17 @@ scripts:
       else
         echo NAME:audit_log_verify_write:LABEL_VALUES:86400:RESULT:0
       fi
-  - name: 99_default_rules_is_empty
+  - name: audit_99_default_rules_is_empty
     interval: 10
     script: |
       #!/bin/bash
-      
+      [ ! -f /etc/audit/rules.d/99-default.rules ] && echo NAME:audit_99_default_rules_is_empty:LABEL_VALUES:ABSENT:RESULT:1 && exit 0
+
       CONTENT=`cat /etc/audit/rules.d/99-default.rules`
       EXPECTED="# Intentionally empty 99-default.rules"
       if [ "$CONTENT" == "$EXPECTED" ]; then
-        echo NAME:99_default_rules_is_empty:LABEL_VALUES:1:RESULT:1
+        echo NAME:audit_99_default_rules_is_empty:LABEL_VALUES:PRESENT:RESULT:1
       else 
-          echo NAME:99_default_rules_is_empty:LABEL_VALUES:1:RESULT:0
+          echo NAME:audit_99_default_rules_is_empty:LABEL_VALUES:PRESENT:RESULT:0
       fi
   
