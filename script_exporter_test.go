@@ -9,19 +9,24 @@ var config = &Config{
 		{"success", "exit 0", 1},
 		{"failure", "exit 1", 1},
 		{"timeout", "sleep 5", 2},
+		{"labels", "echo LABEL:MYLABEL:398493840\n", 1},
 	},
 }
 
 func TestRunScripts(t *testing.T) {
 	measurements := runScripts(config.Scripts)
 
+	expectedLables := make(map[string]string)
+	expectedLables["MYLABEL"] = "398493840"
 	expectedResults := map[string]struct {
 		success     int
 		minDuration float64
+		labels      map[string]string
 	}{
-		"success": {1, 0},
-		"failure": {0, 0},
-		"timeout": {0, 2},
+		"success": {1, 0, make(map[string]string)},
+		"failure": {0, 0, make(map[string]string)},
+		"timeout": {0, 2, make(map[string]string)},
+		"labels":  {1, 0, expectedLables},
 	}
 
 	for _, measurement := range measurements {
@@ -33,6 +38,12 @@ func TestRunScripts(t *testing.T) {
 
 		if measurement.Duration < expectedResult.minDuration {
 			t.Errorf("Expected duration %f < %f: %s", measurement.Duration, expectedResult.minDuration, measurement.Script.Name)
+		}
+		l := expectedResult.labels
+		for k, v := range l {
+			if measurement.Labels[k] != v {
+				t.Errorf("Expected label not found %s: %s script: %s", measurement.Labels, expectedResult.labels, measurement.Script.Name)
+			}
 		}
 	}
 }
@@ -77,7 +88,7 @@ func TestScriptFilter(t *testing.T) {
 			t.Errorf("Unexpected: %s", err.Error())
 		}
 
-		if len(scripts) != 3 {
+		if len(scripts) != 4 {
 			t.Fatalf("Expected 3 scripts, received %d", len(scripts))
 		}
 
