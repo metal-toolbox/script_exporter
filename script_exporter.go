@@ -33,12 +33,18 @@ var (
 
 type Config struct {
 	Scripts []*Script `yaml:"scripts"`
+	Metrics []*Metric `yaml:"metrics"`
 }
 
 type Script struct {
 	Name    string `yaml:"name"`
 	Content string `yaml:"script"`
 	Timeout int64  `yaml:"timeout"`
+}
+
+type Metric struct {
+	Name string `yaml:"name"`
+	Type string `yaml:"type"`
 }
 
 type Measurement struct {

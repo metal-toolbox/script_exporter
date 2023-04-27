@@ -5,6 +5,9 @@ import (
 )
 
 var config = &Config{
+	Metrics: []*Metric{
+		{"last-modify-time", "gauge"},
+	},
 	Scripts: []*Script{
 		{"success", "exit 0", 1},
 		{"failure", "exit 1", 1},
