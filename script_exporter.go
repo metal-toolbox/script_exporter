@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,8 +33,8 @@ var (
 )
 
 type Config struct {
-	Scripts []*Script `yaml:"scripts"`
-	Metrics []*Metric `yaml:"metrics"`
+	Scripts []*Script          `yaml:"scripts"`
+	Metrics map[string]*Metric `yaml:"metrics"`
 }
 
 type Script struct {
@@ -49,6 +50,7 @@ type Metric struct {
 	Help      string   `yaml:"help"`
 	Labels    []string `yaml:"labels"`
 	Namespace string   `yaml:"namespace"`
+	Metric    interface{}
 }
 
 type MetricOutput struct {
@@ -58,26 +60,28 @@ type MetricOutput struct {
 }
 
 type Measurement struct {
-	Script       *Script
-	Success      int
-	Duration     float64
-	MetricOutput MetricOutput
+	Script        *Script
+	Success       int
+	Duration      float64
+	MetricOutputs []MetricOutput
 }
 
 var pidRE = regexp.MustCompile(`NAME:(?P<NAME>\w+):LABEL_VALUES:(?P<VALUE>.+):RESULT:(?P<VALUE>.+)`)
 
-func getLabels(output string) MetricOutput {
-	m := MetricOutput{}
+func getMetricOutput(output string) []MetricOutput {
+	ms := []MetricOutput{}
 	for _, v := range strings.Split(output, "\n") {
 		entryMatches := pidRE.FindStringSubmatch(v)
 		if entryMatches == nil {
-			return m
+			continue
 		}
+		m := MetricOutput{}
 		m.Name = entryMatches[1]
 		m.Labels = strings.Split(entryMatches[2], ",")
 		m.Result = entryMatches[3]
+		ms = append(ms, m)
 	}
-	return m
+	return ms
 }
 
 func runScript(script *Script) (string, error) {
@@ -130,14 +134,13 @@ func runScripts(scripts []*Script) []*Measurement {
 			}
 
 			m := &Measurement{
-				Script:       script,
-				Duration:     duration,
-				Success:      success,
-				MetricOutput: MetricOutput{},
+				Script:   script,
+				Duration: duration,
+				Success:  success,
 			}
 
-			mo := getLabels(stdout)
-			m.MetricOutput = mo
+			mo := getMetricOutput(stdout)
+			m.MetricOutputs = mo
 
 			ch <- m
 		}(script)
@@ -191,16 +194,38 @@ func scriptRunHandler(w http.ResponseWriter, r *http.Request, config *Config) {
 
 	for _, measurement := range measurements {
 
-		fmt.Fprintf(w, "script_duration_seconds{script=\"%s\"} %f\n", measurement.Script.Name, measurement.Duration)
-		fmt.Fprintf(w, "script_success{script=\"%s\"} %d\n", measurement.Script.Name, measurement.Success)
+		for _, v := range measurement.MetricOutputs {
+			if m, ok := config.Metrics[v.Name]; ok {
+
+				processMetric(m, v)
+			} else {
+				log.Infof("invalid metric name: %s", v.Name)
+			}
+
+		}
 	}
 }
 
-func createMetrics(metrics []*Metric) {
+func processMetric(m *Metric, mo MetricOutput) error {
+	switch m.Type {
+	case "GaugeVec":
+		metric, ok := m.Metric.(prometheus.GaugeVec)
+		if !ok {
+			log.Infof("%v is not a GaugeVec", m)
+		}
+		if r, err := strconv.ParseFloat(mo.Result, 64); err == nil {
+			metric.WithLabelValues(mo.Labels...).Add(r)
+		}
+	}
+
+	return nil
+}
+
+func createMetrics(metrics map[string]*Metric) {
 	for _, m := range metrics {
 		switch m.Type {
 		case "GaugeVec":
-			prometheus.NewGaugeVec(
+			m.Metric = prometheus.NewGaugeVec(
 				prometheus.GaugeOpts{
 					Name:      m.Name,
 					Namespace: m.Namespace,
@@ -209,7 +234,6 @@ func createMetrics(metrics []*Metric) {
 				m.Labels,
 			)
 		}
-
 	}
 }
 
