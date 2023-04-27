@@ -37,33 +37,45 @@ type Config struct {
 }
 
 type Script struct {
-	Name    string `yaml:"name"`
-	Content string `yaml:"script"`
-	Timeout int64  `yaml:"timeout"`
+	Name     string `yaml:"name"`
+	Content  string `yaml:"script"`
+	Timeout  int64  `yaml:"timeout"`
+	Interval int    `yaml:"interval"`
 }
 
 type Metric struct {
-	Name string `yaml:"name"`
-	Type string `yaml:"type"`
+	Name      string   `yaml:"name"`
+	Type      string   `yaml:"type"`
+	Help      string   `yaml:"help"`
+	Labels    []string `yaml:"labels"`
+	Namespace string   `yaml:"namespace"`
+}
+
+type MetricOutput struct {
+	Name   string
+	Result string
+	Labels []string
 }
 
 type Measurement struct {
-	Script   *Script
-	Success  int
-	Duration float64
-	Labels   map[string]string
+	Script       *Script
+	Success      int
+	Duration     float64
+	MetricOutput MetricOutput
 }
 
-var pidRE = regexp.MustCompile(`LABEL:(?P<NAME>\w+):(?P<VALUE>.+)`)
+var pidRE = regexp.MustCompile(`NAME:(?P<NAME>\w+):LABEL_VALUES:(?P<VALUE>.+):RESULT:(?P<VALUE>.+)`)
 
-func getLabels(output string) map[string]string {
-	m := make(map[string]string)
+func getLabels(output string) MetricOutput {
+	m := MetricOutput{}
 	for _, v := range strings.Split(output, "\n") {
 		entryMatches := pidRE.FindStringSubmatch(v)
 		if entryMatches == nil {
 			return m
 		}
-		m[entryMatches[1]] = entryMatches[2]
+		m.Name = entryMatches[1]
+		m.Labels = strings.Split(entryMatches[2], ",")
+		m.Result = entryMatches[3]
 	}
 	return m
 }
@@ -118,13 +130,14 @@ func runScripts(scripts []*Script) []*Measurement {
 			}
 
 			m := &Measurement{
-				Script:   script,
-				Duration: duration,
-				Success:  success,
+				Script:       script,
+				Duration:     duration,
+				Success:      success,
+				MetricOutput: MetricOutput{},
 			}
 
-			labels := getLabels(stdout)
-			m.Labels = labels
+			mo := getLabels(stdout)
+			m.MetricOutput = mo
 
 			ch <- m
 		}(script)
@@ -177,12 +190,26 @@ func scriptRunHandler(w http.ResponseWriter, r *http.Request, config *Config) {
 	measurements := runScripts(scripts)
 
 	for _, measurement := range measurements {
-		labels := ""
-		for k, v := range measurement.Labels {
-			labels += fmt.Sprintf("\"%s=%s\" ", k, v)
-		}
+
 		fmt.Fprintf(w, "script_duration_seconds{script=\"%s\"} %f\n", measurement.Script.Name, measurement.Duration)
-		fmt.Fprintf(w, "script_success{script=\"%s\" %s} %d\n", measurement.Script.Name, labels, measurement.Success)
+		fmt.Fprintf(w, "script_success{script=\"%s\"} %d\n", measurement.Script.Name, measurement.Success)
+	}
+}
+
+func createMetrics(metrics []*Metric) {
+	for _, m := range metrics {
+		switch m.Type {
+		case "GaugeVec":
+			prometheus.NewGaugeVec(
+				prometheus.GaugeOpts{
+					Name:      m.Name,
+					Namespace: m.Namespace,
+					Help:      m.Help,
+				},
+				m.Labels,
+			)
+		}
+
 	}
 }
 
@@ -222,6 +249,7 @@ func main() {
 		}
 	}
 
+	createMetrics(config.Metrics)
 	http.Handle("/metrics", promhttp.Handler())
 
 	http.HandleFunc("/probe", func(w http.ResponseWriter, r *http.Request) {

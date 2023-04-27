@@ -6,29 +6,28 @@ import (
 
 var config = &Config{
 	Metrics: []*Metric{
-		{"last-modify-time", "gauge"},
+		{"last-modify-time", "gauge", "help", []string{}, "namespace"},
 	},
 	Scripts: []*Script{
-		{"success", "exit 0", 1},
-		{"failure", "exit 1", 1},
-		{"timeout", "sleep 5", 2},
-		{"labels", "echo LABEL:MYLABEL:398493840\n", 1},
+		{"success", "exit 0", 1, 1},
+		{"failure", "exit 1", 1, 1},
+		{"timeout", "sleep 5", 2, 1},
+		{"labels", "echo NAME:MYMETRIC:398493840\n", 1, 1},
 	},
 }
 
 func TestRunScripts(t *testing.T) {
 	measurements := runScripts(config.Scripts)
 
-	expectedLables := make(map[string]string)
-	expectedLables["MYLABEL"] = "398493840"
+	expectedLables := []string{"398493840"}
 	expectedResults := map[string]struct {
 		success     int
 		minDuration float64
-		labels      map[string]string
+		labels      []string
 	}{
-		"success": {1, 0, make(map[string]string)},
-		"failure": {0, 0, make(map[string]string)},
-		"timeout": {0, 2, make(map[string]string)},
+		"success": {1, 0, []string{}},
+		"failure": {0, 0, []string{}},
+		"timeout": {0, 2, []string{}},
 		"labels":  {1, 0, expectedLables},
 	}
 
@@ -43,9 +42,9 @@ func TestRunScripts(t *testing.T) {
 			t.Errorf("Expected duration %f < %f: %s", measurement.Duration, expectedResult.minDuration, measurement.Script.Name)
 		}
 		l := expectedResult.labels
-		for k, v := range l {
-			if measurement.Labels[k] != v {
-				t.Errorf("Expected label not found %s: %s script: %s", measurement.Labels, expectedResult.labels, measurement.Script.Name)
+		for i := range l {
+			if measurement.MetricOutput.Labels[i] != expectedLables[i] {
+				t.Errorf("Expected label not found %s: %s script: %s", measurement.MetricOutput.Labels, expectedResult.labels, measurement.Script.Name)
 			}
 		}
 	}
