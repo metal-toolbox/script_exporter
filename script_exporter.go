@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v2"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -178,43 +179,58 @@ func scriptFilter(scripts []*Script, name, pattern string) (filteredScripts []*S
 	return
 }
 
-func scriptRunHandler(w http.ResponseWriter, r *http.Request, config *Config) {
-	params := r.URL.Query()
-	name := params.Get("name")
-	pattern := params.Get("pattern")
+func runScriptWorker(config *Config) error {
+	eg, groupCtx := errgroup.WithContext(context.Background())
 
-	scripts, err := scriptFilter(config.Scripts, name, pattern)
+	for _, s := range config.Scripts {
+		eg.Go(func() error {
+			tickChan := time.NewTicker(time.Second * time.Duration(s.Interval)).C
+			for {
+				select {
+				case <-tickChan:
+					measurements := runScripts([]*Script{s})
+					for _, measurement := range measurements {
 
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
+						for _, v := range measurement.MetricOutputs {
+							if m, ok := config.Metrics[v.Name]; ok {
 
-	measurements := runScripts(scripts)
+								processMetric(m, v)
+							} else {
+								log.Infof("invalid metric name: %s", v.Name)
+							}
 
-	for _, measurement := range measurements {
-
-		for _, v := range measurement.MetricOutputs {
-			if m, ok := config.Metrics[v.Name]; ok {
-
-				processMetric(m, v)
-			} else {
-				log.Infof("invalid metric name: %s", v.Name)
+						}
+					}
+				case <-groupCtx.Done():
+					return nil
+				}
 			}
-
-		}
+		})
 	}
+
+	if err := eg.Wait(); err != nil {
+		// We cannot treat errors containing context.Canceled
+		// as non-errors because the errgroup.Group uses its
+		// own context, which is canceled if one of the Go
+		// routines returns a non-nil error. Thus, treating
+		// context.Canceled as a graceful shutdown may hide
+
+		// an error returned by one of the Go routines.
+		return err
+	}
+
+	return nil
 }
 
 func processMetric(m *Metric, mo MetricOutput) error {
 	switch m.Type {
 	case "GaugeVec":
-		metric, ok := m.Metric.(prometheus.GaugeVec)
+		metric, ok := m.Metric.(*prometheus.GaugeVec)
 		if !ok {
 			log.Infof("%v is not a GaugeVec", m)
 		}
 		if r, err := strconv.ParseFloat(mo.Result, 64); err == nil {
-			metric.WithLabelValues(mo.Labels...).Add(r)
+			metric.WithLabelValues(mo.Labels...).Set(r)
 		}
 	}
 
@@ -233,12 +249,10 @@ func createMetrics(metrics map[string]*Metric) {
 				},
 				m.Labels,
 			)
+			prometheus.DefaultRegisterer.MustRegister(m.Metric.(*prometheus.GaugeVec))
+
 		}
 	}
-}
-
-func init() {
-	prometheus.MustRegister(version.NewCollector("script_exporter"))
 }
 
 func main() {
@@ -274,6 +288,10 @@ func main() {
 	}
 
 	createMetrics(config.Metrics)
+	go func() {
+		runScriptWorker(&config)
+	}()
+
 	http.Handle("/metrics", promhttp.Handler())
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
