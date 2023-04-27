@@ -10,7 +10,7 @@
             "request": "launch",
             "mode": "auto",
             "program": "${workspaceFolder}/script_exporter.go",
-            "args": ["-config.file", "${workspaceFolder}/script-exporter.yml"]
+            "args": ["-config.file", "${workspaceFolder}/script-exporter.yml", "-config.shell", "/bin/bash"]
 
         }
     ]

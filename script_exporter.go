@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v2"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -154,36 +152,9 @@ func runScripts(scripts []*Script) []*Measurement {
 	return measurements
 }
 
-func scriptFilter(scripts []*Script, name, pattern string) (filteredScripts []*Script, err error) {
-	if name == "" && pattern == "" {
-		err = errors.New("`name` or `pattern` required")
-		return
-	}
-
-	var patternRegexp *regexp.Regexp
-
-	if pattern != "" {
-		patternRegexp, err = regexp.Compile(pattern)
-
-		if err != nil {
-			return
-		}
-	}
-
-	for _, script := range scripts {
-		if script.Name == name || (pattern != "" && patternRegexp.MatchString(script.Name)) {
-			filteredScripts = append(filteredScripts, script)
-		}
-	}
-
-	return
-}
-
 func runScriptWorker(config *Config) error {
-	eg, groupCtx := errgroup.WithContext(context.Background())
-
 	for _, s := range config.Scripts {
-		eg.Go(func() error {
+		go func(s *Script) {
 			tickChan := time.NewTicker(time.Second * time.Duration(s.Interval)).C
 			for {
 				select {
@@ -201,24 +172,10 @@ func runScriptWorker(config *Config) error {
 
 						}
 					}
-				case <-groupCtx.Done():
-					return nil
 				}
 			}
-		})
+		}(s)
 	}
-
-	if err := eg.Wait(); err != nil {
-		// We cannot treat errors containing context.Canceled
-		// as non-errors because the errgroup.Group uses its
-		// own context, which is canceled if one of the Go
-		// routines returns a non-nil error. Thus, treating
-		// context.Canceled as a graceful shutdown may hide
-
-		// an error returned by one of the Go routines.
-		return err
-	}
-
 	return nil
 }
 
@@ -238,6 +195,7 @@ func processMetric(m *Metric, mo MetricOutput) error {
 }
 
 func createMetrics(metrics map[string]*Metric) {
+	c := []prometheus.Collector{}
 	for _, m := range metrics {
 		switch m.Type {
 		case "GaugeVec":
@@ -249,10 +207,10 @@ func createMetrics(metrics map[string]*Metric) {
 				},
 				m.Labels,
 			)
-			prometheus.DefaultRegisterer.MustRegister(m.Metric.(*prometheus.GaugeVec))
-
+			c = append(c, m.Metric.(*prometheus.GaugeVec))
 		}
 	}
+	prometheus.DefaultRegisterer.MustRegister(c...)
 }
 
 func main() {
