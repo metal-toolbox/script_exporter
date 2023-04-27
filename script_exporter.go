@@ -276,10 +276,6 @@ func main() {
 	createMetrics(config.Metrics)
 	http.Handle("/metrics", promhttp.Handler())
 
-	http.HandleFunc("/probe", func(w http.ResponseWriter, r *http.Request) {
-		scriptRunHandler(w, r, &config)
-	})
-
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 			<head><title>Script Exporter</title></head>
