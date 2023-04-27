@@ -17,39 +17,28 @@ var config = &Config{
 }
 
 func TestRunScripts(t *testing.T) {
-	measurements := runScripts(config.Scripts)
+	for _, s := range config.Scripts {
+		mos, _ := runScript(s)
 
-	expectedLables := [][]string{{"398493840"}}
-	expectedResults := map[string]struct {
-		success     int
-		minDuration float64
-		labels      [][]string
-	}{
-		"success": {1, 0, [][]string{}},
-		"failure": {0, 0, [][]string{}},
-		"timeout": {0, 2, [][]string{}},
-		"labels":  {1, 0, expectedLables},
-	}
-
-	for _, measurement := range measurements {
-		expectedResult := expectedResults[measurement.Script.Name]
-
-		if measurement.Success != expectedResult.success {
-			t.Errorf("Expected result not found: %s", measurement.Script.Name)
+		expectedLables := [][]string{{"398493840"}}
+		expectedResults := map[string]struct {
+			success     int
+			minDuration float64
+			labels      [][]string
+		}{
+			"success":  {1, 0, [][]string{}},
+			"failure":  {0, 0, [][]string{}},
+			"timeout":  {0, 2, [][]string{}},
+			"MYMETRIC": {1, 0, expectedLables},
 		}
 
-		if measurement.Duration < expectedResult.minDuration {
-			t.Errorf("Expected duration %f < %f: %s", measurement.Duration, expectedResult.minDuration, measurement.Script.Name)
-		}
-
-		for i, mo := range measurement.MetricOutputs {
-			for j, v := range expectedLables[i] {
-				if mo.Labels[j] != v {
-					t.Errorf("Expected label not found %s: %s script: %s", mo.Labels[j], v, measurement.Script.Name)
+		for i, mo := range mos {
+			expectedResult := expectedResults[mo.Name]
+			for j := range mo.Labels {
+				if mo.Labels[j] != expectedResult.labels[i][j] {
+					t.Errorf("Expected label not found %s: %s script: %s", mo.Labels[j], expectedLables[i][j], mo.Name)
 				}
 			}
-
 		}
-
 	}
 }

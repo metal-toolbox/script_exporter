@@ -58,13 +58,6 @@ type MetricOutput struct {
 	Labels []string
 }
 
-type Measurement struct {
-	Script        *Script
-	Success       int
-	Duration      float64
-	MetricOutputs []MetricOutput
-}
-
 var pidRE = regexp.MustCompile(`NAME:(?P<NAME>\w+):LABEL_VALUES:(?P<VALUE>.+):RESULT:(?P<VALUE>.+)`)
 
 func getMetricOutput(output string) []MetricOutput {
@@ -83,7 +76,7 @@ func getMetricOutput(output string) []MetricOutput {
 	return ms
 }
 
-func runScript(script *Script) (string, error) {
+func runScript(script *Script) ([]MetricOutput, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(script.Timeout)*time.Second)
 	defer cancel()
 
@@ -96,60 +89,22 @@ func runScript(script *Script) (string, error) {
 	bashIn, err := bashCmd.StdinPipe()
 
 	if err != nil {
-		return "", err
+		return []MetricOutput{}, err
 	}
 
 	if err = bashCmd.Start(); err != nil {
-		return "", err
+		return []MetricOutput{}, err
 	}
 
 	if _, err = bashIn.Write([]byte(script.Content)); err != nil {
-		return "", err
+		return []MetricOutput{}, err
 	}
 
 	bashIn.Close()
 
 	err = bashCmd.Wait()
-	return stdBuffer.String(), err
-}
 
-func runScripts(scripts []*Script) []*Measurement {
-	measurements := make([]*Measurement, 0)
-
-	ch := make(chan *Measurement)
-
-	for _, script := range scripts {
-		go func(script *Script) {
-			start := time.Now()
-			success := 0
-			stdout, err := runScript(script)
-			duration := time.Since(start).Seconds()
-
-			if err == nil {
-				log.Debugf("OK: %s (after %fs).", script.Name, duration)
-				success = 1
-			} else {
-				log.Infof("ERROR: %s: %s (failed after %fs).", script.Name, err, duration)
-			}
-
-			m := &Measurement{
-				Script:   script,
-				Duration: duration,
-				Success:  success,
-			}
-
-			mo := getMetricOutput(stdout)
-			m.MetricOutputs = mo
-
-			ch <- m
-		}(script)
-	}
-
-	for i := 0; i < len(scripts); i++ {
-		measurements = append(measurements, <-ch)
-	}
-
-	return measurements
+	return getMetricOutput(stdBuffer.String()), err
 }
 
 func runScriptWorker(config *Config) error {
@@ -159,17 +114,15 @@ func runScriptWorker(config *Config) error {
 			for {
 				select {
 				case <-tickChan:
-					measurements := runScripts([]*Script{s})
-					for _, measurement := range measurements {
-
-						for _, v := range measurement.MetricOutputs {
-							if m, ok := config.Metrics[v.Name]; ok {
-
-								processMetric(m, v)
-							} else {
-								log.Infof("invalid metric name: %s", v.Name)
-							}
-
+					mos, err := runScript(s)
+					if err != nil {
+						continue
+					}
+					for _, mo := range mos {
+						if m, ok := config.Metrics[mo.Name]; ok {
+							processMetric(m, mo)
+						} else {
+							log.Infof("invalid metric name: %s", mo.Name)
 						}
 					}
 				}
