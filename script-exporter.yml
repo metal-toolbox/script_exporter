@@ -1,10 +1,54 @@
+
+metrics:
+  audit_log_modify_time:
+      name: audit_log_modify_time
+      type: GaugeVec
+      help: collects last write time on audit.log file
+      labels: 
+        - mode
+      namespace: audito_maldito
+  audit_log_verify_write:
+      name: audit_log_verify_write
+      type: GaugeVec
+      help: determines if audit.log is being written to
+      labels: 
+        - interval
+      namespace: audito_maldito      
+  audit_99_default_rules_is_empty:
+      name: audit_99_default_rules_is_empty
+      type: GaugeVec
+      help: determines if 99-default.rules exists and if  present compares expected content
+      labels: 
+        - file_status
+      namespace: audito_maldito         
 scripts:
-  - name: 'success'
-    script: sleep 5
+  - name: 'audit_log_modify_time'
+    interval: 10
+    script: |
+      #!/bin/bash
 
-  - name: 'failure'
-    script: sleep 2 && exit 1
+      echo NAME:audit_log_modify_time:LABEL_VALUES:debug:RESULT:`echo $(stat -c %Y /var/log/audit/audit.log)`
+  - name: 'audit_log_verify_write'
+    interval: 10
+    script: |
+      #!/bin/bash
 
-  - name: 'timeout'
-    script: sleep 5
-    timeout: 1
+      if (( $(($(date +%s) - $(stat -c %Y /var/log/audit/audit.log))) < 86400 )); then
+        echo NAME:audit_log_verify_write:LABEL_VALUES:86400:RESULT:1
+      else
+        echo NAME:audit_log_verify_write:LABEL_VALUES:86400:RESULT:0
+      fi
+  - name: audit_99_default_rules_is_empty
+    interval: 10
+    script: |
+      #!/bin/bash
+      [ ! -f /etc/audit/rules.d/99-default.rules ] && echo NAME:audit_99_default_rules_is_empty:LABEL_VALUES:ABSENT:RESULT:1 && exit 0
+
+      CONTENT=`cat /etc/audit/rules.d/99-default.rules`
+      EXPECTED="# Intentionally empty 99-default.rules"
+      if [ "$CONTENT" == "$EXPECTED" ]; then
+        echo NAME:audit_99_default_rules_is_empty:LABEL_VALUES:PRESENT:RESULT:1
+      else 
+          echo NAME:audit_99_default_rules_is_empty:LABEL_VALUES:PRESENT:RESULT:0
+      fi
+  

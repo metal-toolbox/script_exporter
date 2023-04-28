@@ -1,17 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"errors"
 	"flag"
 	"fmt"
-	"gopkg.in/yaml.v2"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
+	"strings"
 	"time"
+
+	"gopkg.in/yaml.v2"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -28,127 +32,138 @@ var (
 )
 
 type Config struct {
-	Scripts []*Script `yaml:"scripts"`
+	Scripts []*Script          `yaml:"scripts"`
+	Metrics map[string]*Metric `yaml:"metrics"`
 }
 
 type Script struct {
-	Name    string `yaml:"name"`
-	Content string `yaml:"script"`
-	Timeout int64  `yaml:"timeout"`
+	Name     string `yaml:"name"`
+	Content  string `yaml:"script"`
+	Timeout  int64  `yaml:"timeout"`
+	Interval int    `yaml:"interval"`
 }
 
-type Measurement struct {
-	Script   *Script
-	Success  int
-	Duration float64
+type Metric struct {
+	Name      string   `yaml:"name"`
+	Type      string   `yaml:"type"`
+	Help      string   `yaml:"help"`
+	Labels    []string `yaml:"labels"`
+	Namespace string   `yaml:"namespace"`
+	Metric    interface{}
 }
 
-func runScript(script *Script) error {
+type MetricOutput struct {
+	Name   string
+	Result string
+	Labels []string
+}
+
+var pidRE = regexp.MustCompile(`NAME:(?P<NAME>\w+):LABEL_VALUES:(?P<VALUE>.+):RESULT:(?P<VALUE>.+)`)
+
+func getMetricOutput(output string) []MetricOutput {
+	ms := []MetricOutput{}
+	for _, v := range strings.Split(output, "\n") {
+		entryMatches := pidRE.FindStringSubmatch(v)
+		if entryMatches == nil {
+			continue
+		}
+		m := MetricOutput{}
+		m.Name = entryMatches[1]
+		m.Labels = strings.Split(entryMatches[2], ",")
+		m.Result = entryMatches[3]
+		ms = append(ms, m)
+	}
+	return ms
+}
+
+func runScript(script *Script) ([]MetricOutput, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(script.Timeout)*time.Second)
 	defer cancel()
 
 	bashCmd := exec.CommandContext(ctx, *shell)
 
+	var stdBuffer bytes.Buffer
+	mw := io.MultiWriter(os.Stdout, &stdBuffer)
+	bashCmd.Stdout = mw
+	bashCmd.Stderr = mw
 	bashIn, err := bashCmd.StdinPipe()
 
 	if err != nil {
-		return err
+		return []MetricOutput{}, err
 	}
 
 	if err = bashCmd.Start(); err != nil {
-		return err
+		return []MetricOutput{}, err
 	}
 
 	if _, err = bashIn.Write([]byte(script.Content)); err != nil {
-		return err
+		return []MetricOutput{}, err
 	}
 
 	bashIn.Close()
 
-	return bashCmd.Wait()
+	err = bashCmd.Wait()
+
+	return getMetricOutput(stdBuffer.String()), err
 }
 
-func runScripts(scripts []*Script) []*Measurement {
-	measurements := make([]*Measurement, 0)
-
-	ch := make(chan *Measurement)
-
-	for _, script := range scripts {
-		go func(script *Script) {
-			start := time.Now()
-			success := 0
-			err := runScript(script)
-			duration := time.Since(start).Seconds()
-
-			if err == nil {
-				log.Debugf("OK: %s (after %fs).", script.Name, duration)
-				success = 1
-			} else {
-				log.Infof("ERROR: %s: %s (failed after %fs).", script.Name, err, duration)
+func runScriptWorker(config *Config) error {
+	for _, s := range config.Scripts {
+		go func(s *Script) {
+			tickChan := time.NewTicker(time.Second * time.Duration(s.Interval)).C
+			for {
+				select {
+				case <-tickChan:
+					mos, err := runScript(s)
+					if err != nil {
+						continue
+					}
+					for _, mo := range mos {
+						if m, ok := config.Metrics[mo.Name]; ok {
+							processMetric(m, mo)
+						} else {
+							log.Infof("invalid metric name: %s", mo.Name)
+						}
+					}
+				}
 			}
-
-			ch <- &Measurement{
-				Script:   script,
-				Duration: duration,
-				Success:  success,
-			}
-		}(script)
+		}(s)
 	}
-
-	for i := 0; i < len(scripts); i++ {
-		measurements = append(measurements, <-ch)
-	}
-
-	return measurements
+	return nil
 }
 
-func scriptFilter(scripts []*Script, name, pattern string) (filteredScripts []*Script, err error) {
-	if name == "" && pattern == "" {
-		err = errors.New("`name` or `pattern` required")
-		return
-	}
-
-	var patternRegexp *regexp.Regexp
-
-	if pattern != "" {
-		patternRegexp, err = regexp.Compile(pattern)
-
-		if err != nil {
-			return
+func processMetric(m *Metric, mo MetricOutput) error {
+	switch m.Type {
+	case "GaugeVec":
+		metric, ok := m.Metric.(*prometheus.GaugeVec)
+		if !ok {
+			log.Infof("%v is not a GaugeVec", m)
+		}
+		if r, err := strconv.ParseFloat(mo.Result, 64); err == nil {
+			metric.WithLabelValues(mo.Labels...).Set(r)
 		}
 	}
 
-	for _, script := range scripts {
-		if script.Name == name || (pattern != "" && patternRegexp.MatchString(script.Name)) {
-			filteredScripts = append(filteredScripts, script)
+	return nil
+}
+
+func createMetrics(metrics map[string]*Metric) {
+	c := []prometheus.Collector{}
+	for _, m := range metrics {
+		switch m.Type {
+		case "GaugeVec":
+			m.Metric = prometheus.NewGaugeVec(
+				prometheus.GaugeOpts{
+					Name:      m.Name,
+					Namespace: m.Namespace,
+					Help:      m.Help,
+				},
+				m.Labels,
+			)
+			c = append(c, m.Metric.(*prometheus.GaugeVec))
 		}
 	}
-
-	return
-}
-
-func scriptRunHandler(w http.ResponseWriter, r *http.Request, config *Config) {
-	params := r.URL.Query()
-	name := params.Get("name")
-	pattern := params.Get("pattern")
-
-	scripts, err := scriptFilter(config.Scripts, name, pattern)
-
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-
-	measurements := runScripts(scripts)
-
-	for _, measurement := range measurements {
-		fmt.Fprintf(w, "script_duration_seconds{script=\"%s\"} %f\n", measurement.Script.Name, measurement.Duration)
-		fmt.Fprintf(w, "script_success{script=\"%s\"} %d\n", measurement.Script.Name, measurement.Success)
-	}
-}
-
-func init() {
-	prometheus.MustRegister(version.NewCollector("script_exporter"))
+	prometheus.DefaultRegisterer.MustRegister(c...)
 }
 
 func main() {
@@ -183,11 +198,12 @@ func main() {
 		}
 	}
 
-	http.Handle("/metrics", promhttp.Handler())
+	createMetrics(config.Metrics)
+	go func() {
+		runScriptWorker(&config)
+	}()
 
-	http.HandleFunc("/probe", func(w http.ResponseWriter, r *http.Request) {
-		scriptRunHandler(w, r, &config)
-	})
+	http.Handle("/metrics", promhttp.Handler())
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
